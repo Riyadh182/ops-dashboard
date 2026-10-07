@@ -6,7 +6,7 @@ import pandas as pd
 import streamlit as st
 
 from charts import CONFIG, SPECS, Acc, compare_chart, kpi_values, make_figs, spec_for, t5_fig, t6_breakdown
-from utils import MONTHS, UNITS, ai_context, build_index, gemini, read_tables, topic_context, topic_sort_key
+from utils import MONTHS, UNITS, ai_context, build_index, gemini_stream, read_tables, topic_context, topic_sort_key
 
 st.set_page_config(page_title="Ops Dashboard", page_icon="📊", layout="wide", initial_sidebar_state="collapsed")
 
@@ -174,9 +174,8 @@ def tile_status(k):
     return "good" if ((k["val"] - ref) < 0) == (k["good"] == "down") else "bad"
 
 
-@st.cache_data(ttl=86400, show_spinner=False)
-def explain(ctx, lang, model, _key):
-    system = (
+def explain_system(lang):
+    return (
         "You are a senior operations analyst for a garment factory (Ha-Meem Group, Ashulia Zone). "
         "You get facts for ONE unit, ONE topic and ONE meeting month, plus the short RCA typed by the unit team. "
         f"Write a detailed root-cause explanation in {LANGS[lang]}. Rules: use ONLY the facts given; never invent numbers, "
@@ -184,7 +183,6 @@ def explain(ctx, lang, model, _key):
         "Use these short headers: What happened (numbers, change vs previous month, vs target) / Why it happened "
         "(expand the RCA into a clear cause chain; for Cut-to-Ship say which of Sewing, Wash, Fabric, Sample&Other is "
         "responsible for how many % of the loss) / Impact / Next actions (max 3 bullets). Max 180 words.")
-    return gemini(ctx, system, _key, model)
 
 
 def rca_block(idx, year, unit, topic, month):
@@ -205,16 +203,22 @@ def rca_block(idx, year, unit, topic, month):
                             unsafe_allow_html=True)
     key = nk("ai")
     if GEMINI_KEY:
-        if st.button("✨ Explain this root cause (Gemini)", key=key):
-            with st.spinner("Gemini is writing the detail..."):
+        lang = st.session_state.get("lang") or "Banglish"
+        ck = f"ai::{unit}|{topic}|{month}|{lang}"
+        cached = st.session_state.get(ck)
+        clicked = st.button("↻ Regenerate AI detail" if cached else "✨ Explain this root cause (Gemini)", key=key)
+        if clicked or cached:
+            st.markdown(f'<div class="ai"><div class="aih">✨ GEMINI · {unit} · {topic.split()[0]} · {month.upper()}</div></div>',
+                        unsafe_allow_html=True)
+            if clicked:
                 try:
                     ctx = topic_context(idx, rca, year, unit, topic, month)
-                    txt = explain(ctx, (st.session_state.get("lang") or "Banglish"), GEMINI_MODEL, GEMINI_KEY)
-                    st.markdown(f'<div class="ai"><div class="aih">✨ GEMINI · {unit} · {topic.split()[0]} · {month.upper()}</div>'
-                                f'{html.escape(txt).replace(chr(10), "<br>")}</div>', unsafe_allow_html=True)
-                    st.caption("AI-written from the sheet data and RCA. Please verify before sharing.")
+                    st.session_state[ck] = st.write_stream(gemini_stream(ctx, explain_system(lang), GEMINI_KEY, GEMINI_MODEL, 600))
                 except Exception as e:
                     st.warning(str(e))
+            else:
+                st.markdown(cached)
+            st.caption("AI-written from the sheet data and RCA. Please verify before sharing.")
     else:
         st.caption("Add GEMINI_API_KEY in the app secrets to get the AI detail for this RCA.")
 
@@ -353,10 +357,9 @@ with tab_ai:
                       "when asked why. For Cut-to-Ship, say which section (Sewing/Wash/Fabric/Smpl&Other) is responsible for how many %. "
                       "Be short.\n\n" + ai_context(build_index(data, ay), rca, ay))
             with st.chat_message("assistant"):
-                with st.spinner("Thinking..."):
-                    try:
-                        ans = gemini(st.session_state.chat[-10:], system, GEMINI_KEY, GEMINI_MODEL)
-                    except Exception as e:
-                        ans = f"⚠️ {e}"
-                st.write(ans)
+                try:
+                    ans = st.write_stream(gemini_stream(st.session_state.chat[-10:], system, GEMINI_KEY, GEMINI_MODEL, 600))
+                except Exception as e:
+                    ans = f"⚠️ {e}"
+                    st.write(ans)
             st.session_state.chat.append({"role": "assistant", "content": ans})

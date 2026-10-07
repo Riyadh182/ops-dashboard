@@ -93,11 +93,13 @@ def build_index(df: pd.DataFrame, year: int):
 
 
 # ---------------------------------------------------------------- Gemini
-FALLBACK_MODELS = ["gemini-3.7-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite"]
+FALLBACK_MODELS = ["gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3.7-flash"]
 
 
-def gemini(prompt_or_msgs, system: str, api_key: str, model: str = "gemini-3.8-flash", max_tokens: int = 1500) -> str:
-    """REST call to the Gemini API (free tier works). Retries on overload (503) and falls back to older Flash models."""
+def gemini_stream(prompt_or_msgs, system: str, api_key: str, model: str = "gemini-3.8-flash", max_tokens: int = 700):
+    """Yields the answer in small pieces as Gemini writes it (first words appear in ~1-2 s).
+    Falls back to other Flash models if one is busy (503) or out of free quota (429)."""
+    import json
     import time
     if isinstance(prompt_or_msgs, str):
         prompt_or_msgs = [{"role": "user", "content": prompt_or_msgs}]
@@ -107,32 +109,53 @@ def gemini(prompt_or_msgs, system: str, api_key: str, model: str = "gemini-3.8-f
     for mdl in [model] + [m for m in FALLBACK_MODELS if m != model]:
         body = {"system_instruction": {"parts": [{"text": system}]}, "contents": contents,
                 "generationConfig": {"temperature": 0.3, "maxOutputTokens": max_tokens,
-                                     "thinkingConfig": ({"thinkingLevel": "low"} if "gemini-3" in mdl else {"thinkingBudget": 0})}}
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{mdl}:generateContent"
-        for attempt in range(3):
+                                     "thinkingConfig": ({"thinkingLevel": "minimal"} if "gemini-3" in mdl else {"thinkingBudget": 0})}}
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{mdl}:streamGenerateContent?alt=sse"
+        for attempt in range(2):
             try:
-                r = requests.post(url, json=body, headers={"x-goog-api-key": api_key}, timeout=60)
+                r = requests.post(url, json=body, headers={"x-goog-api-key": api_key}, timeout=(6, 40), stream=True)
             except requests.RequestException as e:
-                last = f"network error: {e}"
-                time.sleep(1.5)
-                continue
+                last = f"{mdl}: network {type(e).__name__}"
+                break
             if r.status_code == 400 and "thinkingConfig" in body["generationConfig"]:
                 body["generationConfig"].pop("thinkingConfig")  # model rejected the thinking setting
                 continue
-            if r.status_code in (500, 502, 503, 504):  # Google busy: wait and retry, then try the next model
-                last = f"{mdl} is busy (HTTP {r.status_code})"
-                time.sleep(2 * (attempt + 1))
+            if r.status_code in (500, 502, 503, 504):
+                last = f"{mdl} busy (HTTP {r.status_code})"
+                time.sleep(1)
                 continue
-            if r.status_code in (404, 429):  # model missing / free quota used: try the next model
+            if r.status_code in (404, 429):
                 last = f"{mdl}: HTTP {r.status_code}"
                 break
             if r.status_code != 200:
                 raise RuntimeError(f"Gemini error {r.status_code}: {r.text[:200]}")
+            got = False
             try:
-                return "".join(p.get("text", "") for p in r.json()["candidates"][0]["content"]["parts"]).strip()
-            except Exception:
-                raise RuntimeError("Gemini returned no answer (maybe blocked). Try rephrasing.")
-    raise RuntimeError(f"Gemini is overloaded right now ({last}). Please try again in a minute.")
+                for line in r.iter_lines():
+                    if not line.startswith(b"data:"):
+                        continue
+                    try:
+                        parts = json.loads(line[5:])["candidates"][0]["content"]["parts"]
+                    except Exception:
+                        continue
+                    txt = "".join(p.get("text", "") for p in parts)
+                    if txt:
+                        got = True
+                        yield txt
+            except requests.RequestException:
+                if got:
+                    return
+                last = f"{mdl}: stream cut"
+                break
+            if got:
+                return
+            last = f"{mdl}: empty answer"
+            break
+    raise RuntimeError(f"Gemini is busy right now ({last}). Please try again in a minute.")
+
+
+def gemini(prompt_or_msgs, system: str, api_key: str, model: str = "gemini-3.8-flash", max_tokens: int = 700) -> str:
+    return "".join(gemini_stream(prompt_or_msgs, system, api_key, model, max_tokens)).strip()
 
 
 def fmt(x, dec=2):
