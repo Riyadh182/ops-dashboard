@@ -129,7 +129,7 @@ def get_index(sheet_id, year):
 
 
 GEMINI_KEY = secret("GEMINI_API_KEY")
-GEMINI_MODEL = secret("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_MODEL = secret("GEMINI_MODEL", "gemini-3.8-flash")
 LANGS = {"Banglish": "Banglish (Bangla written in English letters, simple factory-floor words)",
          "English": "simple English", "বাংলা": "Bangla script"}
 

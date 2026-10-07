@@ -93,7 +93,7 @@ def build_index(df: pd.DataFrame, year: int):
 
 
 # ---------------------------------------------------------------- Gemini
-def gemini(prompt_or_msgs, system: str, api_key: str, model: str = "gemini-2.5-flash", max_tokens: int = 1500) -> str:
+def gemini(prompt_or_msgs, system: str, api_key: str, model: str = "gemini-3.8-flash", max_tokens: int = 1500) -> str:
     """Plain REST call to the Gemini API (free tier works). prompt_or_msgs = str or [{'role','content'}]."""
     if isinstance(prompt_or_msgs, str):
         prompt_or_msgs = [{"role": "user", "content": prompt_or_msgs}]
@@ -101,10 +101,10 @@ def gemini(prompt_or_msgs, system: str, api_key: str, model: str = "gemini-2.5-f
                 for m in prompt_or_msgs]
     body = {"system_instruction": {"parts": [{"text": system}]}, "contents": contents,
             "generationConfig": {"temperature": 0.3, "maxOutputTokens": max_tokens,
-                                 "thinkingConfig": {"thinkingBudget": 0}}}
+                                 "thinkingConfig": ({"thinkingLevel": "low"} if "gemini-3" in model else {"thinkingBudget": 0})}}
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
     r = requests.post(url, json=body, headers={"x-goog-api-key": api_key}, timeout=60)
-    if r.status_code == 400 and "thinking" in r.text.lower():  # model without thinking support
+    if r.status_code == 400:  # model rejected the thinking setting: retry without it
         body["generationConfig"].pop("thinkingConfig")
         r = requests.post(url, json=body, headers={"x-goog-api-key": api_key}, timeout=60)
     if r.status_code == 429:
